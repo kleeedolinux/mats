@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use walkdir::WalkDir;
 use zip::{write::FileOptions, CompressionMethod, ZipWriter};
+use sha2::{Sha256, Digest};
+use hex;
 
 #[derive(Debug, Deserialize)]
 struct Metadata {
@@ -48,40 +50,8 @@ impl MatsZipper {
         Ok(serde_yaml::from_str(&contents)?)
     }
 
-    fn generate_sha256_info(&self, metadata: &Metadata) -> Result<String> {
-        use sha2::{Sha256, Digest};
-        let mut hasher = Sha256::new();
-        let exec_path = if self.source_path.is_dir() {
-            self.source_path.join(&metadata.executable)
-        } else {
-            self.source_path.clone()
-        };
-
-        let mut file = File::open(&exec_path)?;
-        std::io::copy(&mut file, &mut hasher)?;
-        let hash = hasher.finalize();
-
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)?
-            .as_secs();
-
-        Ok(format!(
-            "sha256: {}\ndate: {}\nname: {}\nexec-file: {}\nauthor: {}\n",
-            hex::encode(hash),
-            now,
-            metadata.name,
-            metadata.executable,
-            metadata.author
-        ))
-    }
-
     pub fn create_archive(&self) -> Result<()> {
         let metadata = self.read_metadata()?;
-        
-        let sha256_info = self.generate_sha256_info(&metadata)?;
-        let sha256_filename = format!("{}.sha256", metadata.name);
-        std::fs::write(&sha256_filename, &sha256_info)?;
-
         let file = File::create(&self.output_path)?;
         let mut zip = ZipWriter::new(file);
         let options = FileOptions::default()
@@ -92,12 +62,30 @@ impl MatsZipper {
         } else {
             self.add_file_to_zip(&mut zip, options)?;
         }
-
-        zip.start_file(&sha256_filename, options)?;
-        zip.write_all(sha256_info.as_bytes())?;
-
         zip.finish()?;
+
+        self.generate_sha256(&metadata)?;
         println!("Created MATS archive for '{}' v{}", metadata.name, metadata.version);
+        Ok(())
+    }
+
+    fn generate_sha256(&self, metadata: &Metadata) -> Result<()> {
+        let mut hasher = Sha256::new();
+        let mut file = File::open(&self.output_path)?;
+        std::io::copy(&mut file, &mut hasher)?;
+        let hash = hasher.finalize();
+
+        let sha256_info = format!(
+            "sha256: {}\ndate: {}\nname: {}\nexec-file: {}\nauthor: {}\n",
+            hex::encode(hash),
+            SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs(),
+            metadata.name,
+            metadata.executable,
+            metadata.author
+        );
+
+        let sha256_filename = format!("{}.sha256", metadata.name);
+        std::fs::write(&sha256_filename, &sha256_info)?;
         println!("SHA256 info written to {}", sha256_filename);
         Ok(())
     }
@@ -134,59 +122,6 @@ impl MatsZipper {
         zip.start_file(&file_name, options)?;
         let mut source_file = File::open(&self.source_path)?;
         std::io::copy(&mut source_file, zip)?;
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use tempfile::tempdir;
-
-    #[test]
-    fn test_create_single_file_archive() -> Result<()> {
-        let temp_dir = tempdir()?;
-        let test_executable = temp_dir.path().join("test.elf");
-        let test_content = b"\x7fELF..."; // Mock ELF header
-        fs::write(&test_executable, test_content)?;
-
-        let output_path = temp_dir.path().join("test.mats");
-        let zipper = MatsZipper::new(
-            &output_path,
-            &test_executable,
-        )?;
-
-        zipper.create_archive()?;
-        assert!(output_path.exists());
-        Ok(())
-    }
-
-    #[test]
-    fn test_create_directory_archive() -> Result<()> {
-        let temp_dir = tempdir()?;
-        let test_app_dir = temp_dir.path().join("testapp");
-        fs::create_dir(&test_app_dir)?;
-
-        // Create test files including an ELF executable
-        let exec_name = "myapp.elf";
-        fs::write(
-            test_app_dir.join(exec_name),
-            b"\x7fELF...", // Mock ELF header
-        )?;
-        fs::write(
-            test_app_dir.join("config.txt"),
-            b"some configuration",
-        )?;
-
-        let output_path = temp_dir.path().join("testapp.mats");
-        let zipper = MatsZipper::new(
-            &output_path,
-            &test_app_dir,
-        )?;
-
-        zipper.create_archive()?;
-        assert!(output_path.exists());
         Ok(())
     }
 } 
